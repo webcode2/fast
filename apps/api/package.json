@@ -1,0 +1,10 @@
+{
+  "name": "fast-logistics",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node src/server.ts",
+    "test": "node --test"
+  }
+}

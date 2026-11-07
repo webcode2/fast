@@ -1,0 +1,9 @@
+{
+  "name": "fast-delivery",
+  "private": true,
+  "workspaces": ["apps/api"],
+  "scripts": {
+    "start": "npm start --workspace fast-logistics",
+    "test": "npm test --workspace fast-logistics"
+  }
+}
