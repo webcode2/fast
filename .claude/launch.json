@@ -1,0 +1,27 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mobile-web-preview",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8090",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "apps/mobile/build/web"
+      ],
+      "port": 8090
+    },
+    {
+      "name": "landing-page",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "apps/web/dev-server.mjs"
+      ],
+      "port": 8092
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "end": 60413,
+  "chapters": [
+    {
+      "key": "welcome",
+      "at": 0
+    },
+    {
+      "key": "pin",
+      "at": 2602
+    },
+    {
+      "key": "search",
+      "at": 6591
+    },
+    {
+      "key": "fare",
+      "at": 10269
+    },
+    {
+      "key": "offers",
+      "at": 15687
+    },
+    {
+      "key": "tracking",
+      "at": 23723
+    },
+    {
+      "key": "reroute",
+      "at": 26924
+    },
+    {
+      "key": "chat",
+      "at": 32496
+    },
+    {
+      "key": "rider",
+      "at": 38865
+    },
+    {
+      "key": "arrive",
+      "at": 44661
+    },
+    {
+      "key": "actions",
+      "at": 51435
+    },
+    {
+      "key": "delivered",
+      "at": 57811
+    }
+  ]
+}

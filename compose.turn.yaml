@@ -1,0 +1,22 @@
+services:
+  turn:
+    image: coturn/coturn:4.7.0
+    network_mode: host
+    command:
+      - -n
+      - --listening-ip=${TURN_LISTEN_IP:?Set TURN_LISTEN_IP to the local test interface address}
+      - --relay-ip=${TURN_LISTEN_IP}
+      - --listening-port=${TURN_PORT:-3478}
+      - --min-port=49160
+      - --max-port=49200
+      - --realm=fastlogistics
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SHARED_SECRET:?Set TURN_SHARED_SECRET}
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --no-multicast-peers
+      - --no-tcp-relay
+      - --user-quota=4
+      - --total-quota=40
+      - --log-file=stdout

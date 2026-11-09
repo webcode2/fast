@@ -1,0 +1,138 @@
+:root {
+  color: #172946;
+  background: #f4f7fc;
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+body { margin: 0; }
+
+.container {
+  width: min(70rem, calc(100% - 2rem));
+  margin-inline: auto;
+}
+
+.site-header {
+  padding-block: 1rem;
+  color: white;
+  background: #123b76;
+  font-weight: 700;
+}
+
+.site-header span {
+  margin-inline-start: 0.75rem;
+  font-weight: 400;
+}
+
+.intro { padding-block: 2.5rem 2rem; }
+
+.eyebrow {
+  color: #1456b8;
+  font-weight: 700;
+}
+
+h1, h2, h3, p { margin: 0; }
+
+h1 {
+  margin-block: 0.5rem;
+  font-size: clamp(2rem, 5vw, 3rem);
+  line-height: 1.15;
+}
+
+.section-header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+
+.section-header span, .areas p { color: #475977; }
+
+.areas {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: 1rem;
+  padding: 0;
+  list-style: none;
+}
+
+.areas li {
+  padding: 1.25rem;
+  border: 1px solid #d5dfed;
+  border-radius: 0.75rem;
+  background: white;
+}
+
+.areas p { margin-top: 0.5rem; }
+
+.site-header a { color: inherit; margin-inline-start: 1rem; }
+
+.auth-page {
+  max-width: 32rem;
+  padding-block: 2rem;
+}
+
+.auth-form {
+  display: grid;
+  gap: 0.75rem;
+  margin-block: 1rem 1.5rem;
+  padding: 1rem;
+  border: 1px solid #d5dfed;
+  border-radius: 0.75rem;
+  background: white;
+}
+
+.auth-form label { display: grid; gap: 0.25rem; }
+
+.auth-form input,
+.auth-form button {
+  box-sizing: border-box;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #8090a8;
+  border-radius: 0.375rem;
+  font: inherit;
+}
+
+.auth-form button {
+  color: white;
+  background: #1456b8;
+  cursor: pointer;
+}
+
+#recovery-title + p,
+#recovery-title + .areas { margin-bottom: 1.5rem; }
+
+#recovery-title + .areas p { overflow-wrap: anywhere; }
+
+.dispute-page { max-width: 46rem; }
+
+.dispute-page dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.35rem 0.75rem;
+  margin: 0;
+}
+
+.dispute-page dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.dispute-details {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.dispute-decision {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.dispute-decision select,
+.dispute-decision textarea {
+  padding: 0.625rem;
+  border: 1px solid #8090a8;
+  border-radius: 0.375rem;
+  font: inherit;
+}

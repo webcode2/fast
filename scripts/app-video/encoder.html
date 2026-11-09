@@ -1,0 +1,52 @@
+<!doctype html>
+<canvas id="c"></canvas>
+<script type="module">
+const plan = await (await fetch('/__plan')).json();
+const canvas = document.getElementById('c');
+canvas.width = plan.width & ~1;
+canvas.height = plan.height & ~1;
+const ctx = canvas.getContext('2d', { alpha: false });
+const load = async (frame) => createImageBitmap(await (await fetch('/__frame/' + frame.name)).blob());
+const type = ['video/mp4;codecs=avc1.42E01F', 'video/mp4', 'video/webm;codecs=vp9'].find((t) => MediaRecorder.isTypeSupported(t));
+const chunks = [];
+const recorder = new MediaRecorder(canvas.captureStream(30), { mimeType: type, videoBitsPerSecond: 2_200_000 });
+recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+const stopped = new Promise((r) => { recorder.onstop = r; });
+
+let current = await load(plan.frames[0]);
+const paint = (now) => {
+  ctx.drawImage(current, 0, 0, canvas.width, canvas.height);
+  for (const tap of plan.taps) {
+    const age = now - tap.at;
+    if (age < 0 || age > 420) continue;
+    const p = age / 420;
+    ctx.beginPath();
+    ctx.arc(tap.x * canvas.width, tap.y * canvas.height, 20 + p * 22, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${0.5 * (1 - p)})`;
+    ctx.strokeStyle = `rgba(6,84,176,${0.9 * (1 - p)})`;
+    ctx.lineWidth = 3;
+    ctx.fill();
+    ctx.stroke();
+  }
+};
+paint(0);
+recorder.start(1000);
+const start = performance.now();
+let index = 0;
+let next = load(plan.frames[1]);
+while (true) {
+  const now = performance.now() - start;
+  if (now >= plan.end) break;
+  while (index + 1 < plan.frames.length && plan.frames[index + 1].at <= now) {
+    current = await next;
+    index++;
+    next = index + 1 < plan.frames.length ? load(plan.frames[index + 1]) : null;
+  }
+  paint(now);
+  await new Promise((r) => setTimeout(r, 16));
+}
+recorder.stop();
+await stopped;
+const blob = new Blob(chunks, { type });
+await fetch('/__upload', { method: 'POST', headers: { 'content-type': type }, body: blob });
+</script>

@@ -2,9 +2,20 @@
   "name": "fast-logistics",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "node src/server.ts",
-    "test": "node --test"
+    "test": "node --test",
+    "start:env": "node --env-file=../../.env src/server.ts",
+    "auth:admin": "node --env-file=../../.env src/auth-admin.ts",
+    "accounts:maintain": "node --env-file=../../.env src/account-maintenance.ts",
+    "payments:worker": "node --env-file=../../.env src/payment-worker.ts"
+  },
+  "dependencies": {
+    "pg": "^8.23.1",
+    "redis": "^6.3.1",
+    "ws": "^8.22.0"
   }
 }

@@ -1,9 +1,15 @@
 {
   "name": "fast-delivery",
   "private": true,
-  "workspaces": ["apps/api"],
+  "workspaces": [
+    "apps/api",
+    "apps/admin"
+  ],
   "scripts": {
     "start": "npm start --workspace fast-logistics",
-    "test": "npm test --workspace fast-logistics"
+    "test": "npm test --workspace fast-logistics",
+    "dev:admin": "npm run dev --workspace fast-logistics-admin",
+    "build:admin": "npm run build --workspace fast-logistics-admin",
+    "dev:web": "node apps/web/dev-server.mjs"
   }
 }
