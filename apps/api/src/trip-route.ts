@@ -1,4 +1,5 @@
 import { db } from './auth.ts';
+import { describeError } from './runtime.ts';
 import { streetRoute, type Point } from './routing.ts';
 
 // GPS drifts on city streets, so one far reading does not count as a missed turn.
@@ -42,8 +43,30 @@ export function routeDecision(state: RouteState, location: Point, nowMs: number)
     : 'drifting';
 }
 
-/** Keeps the live road route current. Tracking continues if the provider fails. */
-export async function followRoute(orderId: string, riderId: string, location: Point) {
+const inFlight = new Map<string, Promise<void>>();
+const failedUntil = new Map<string, number>();
+const failureCooldownMs = 30_000;
+
+/**
+ * Keeps the live road route current without holding up the rider's GPS update.
+ * One update runs per trip, and a provider failure waits before trying again.
+ */
+export function followRoute(orderId: string, riderId: string, location: Point) {
+  if (inFlight.has(orderId) || (failedUntil.get(orderId) ?? 0) > Date.now()) return;
+  const work = updateRoute(orderId, riderId, location)
+    .then(() => { failedUntil.delete(orderId); })
+    .catch((error) => {
+      failedUntil.set(orderId, Date.now() + failureCooldownMs);
+      console.error(`Trip route update failed: ${describeError(error)}`);
+    })
+    .finally(() => { inFlight.delete(orderId); });
+  inFlight.set(orderId, work);
+}
+
+/** Lets checks wait for background route updates. */
+export const routeUpdatesSettled = () => Promise.all(inFlight.values());
+
+async function updateRoute(orderId: string, riderId: string, location: Point) {
   const { rows: [trip] } = await db.query(
     `SELECT o.status, ST_Y(o.pickup::geometry) AS pickup_latitude, ST_X(o.pickup::geometry) AS pickup_longitude,
        ST_Y(o.dropoff::geometry) AS dropoff_latitude, ST_X(o.dropoff::geometry) AS dropoff_longitude,

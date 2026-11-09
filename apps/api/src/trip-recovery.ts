@@ -8,9 +8,11 @@ export async function recoveryAlerts() {
     `SELECT id, status, assigned_rider_id AS "riderId",
        COALESCE(tracking_received_at, rider_location_at, assigned_at) AS "lastTrackingAt",
        recovery_requested_at AS "recoveryRequestedAt",
-       (${gpsDropout}) AS "trackingDropout"
-     FROM delivery_orders WHERE status IN ('assigned','picked_up')
-       AND (recovery_requested_at IS NOT NULL OR ${gpsDropout})
+       status IN ('assigned','picked_up') AND (${gpsDropout}) AS "trackingDropout",
+       EXISTS (SELECT 1 FROM trip_payments p WHERE p.order_id=delivery_orders.id AND p.collected_at IS NOT NULL) AS "paymentCollected"
+     FROM delivery_orders WHERE (status IN ('assigned','picked_up') AND (recovery_requested_at IS NOT NULL OR ${gpsDropout}))
+       OR (status='customer_unavailable' AND EXISTS (
+         SELECT 1 FROM trip_payments p WHERE p.order_id=delivery_orders.id AND p.collected_at IS NOT NULL))
      ORDER BY COALESCE(recovery_requested_at, tracking_received_at, rider_location_at, assigned_at), id
      LIMIT 100`,
   );

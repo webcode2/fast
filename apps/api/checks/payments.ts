@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { db } from '../src/auth.ts';
 import { server } from '../src/server.ts';
 import { settlePayments } from '../src/payment-settlement.ts';
+import { reconcileCollections } from '../src/payments.ts';
 
 if (!process.env.DATABASE_URL) throw new Error('Use an isolated, migrated test database');
 const key = 'sk_sandbox_localcontractcheck';
@@ -17,6 +18,7 @@ const collections = new Map<string, { amount: string; checkout: string; charge: 
 const transfers = new Map<string, object>();
 const payouts = new Map<string, object>();
 const refunds = new Map<string, object>();
+const sessions = new Map<string, Record<string, unknown>>();
 const posts = { transfers: 0, payouts: 0, refunds: 0 };
 let loseTransferResponse = false;
 let rejectCashCheckout = false;
@@ -43,8 +45,13 @@ globalThis.fetch = async (input, options) => {
     const id = body.reference.slice(3);
     const checkout = 'chk_' + id;
     collections.set(body.reference, { amount: body.pricing.amount, checkout, charge: 'ch_' + id });
+    sessions.set(checkout, { checkout_id: checkout, reference: body.reference, status: 'open', charge: null });
     return Response.json({ reference: body.reference, checkout_id: checkout, checkout_url: 'https://checkout.bachs.io/c/' + checkout,
       expires_at: new Date(Date.now() + 3600_000).toISOString() });
+  }
+  if (path.startsWith('/v1/checkout-sessions/')) {
+    const session = sessions.get(path.split('/').at(-1)!);
+    return session ? Response.json(session) : missing();
   }
   if (path === '/v1/payouts/destinations/' + destination) {
     assert.equal(headers.get('x-account-id'), recipient);
@@ -179,6 +186,7 @@ try {
     assert.equal((await webhook(checkout.body.reference)).status, 200);
     assert.equal((await request(path, rider.token)).body.trip.paymentPending, false);
     assert.equal((await request(path + '/pickup', rider.token, 'POST')).status, 200);
+    await db.query('UPDATE delivery_orders SET rider_location=dropoff,rider_location_at=now() WHERE id=$1', [trip.id]);
     assert.equal((await request(path + '/complete', rider.token, 'POST')).status, 200);
     return { id: trip.id, path };
   }
@@ -325,6 +333,123 @@ try {
   assert.equal((await balance()).body.outstandingKobo, '0');
   const repayments = await db.query("SELECT 1 FROM cash_commission_repayments WHERE rider_id=$1 AND state='paid'", [rider.id]);
   assert.equal(repayments.rowCount, 2);
+  // Recovery: lost webhooks, abandoned checkouts, stuck paid trips, and held payouts.
+  async function assignedTrip() {
+    const { rows: [trip] } = await db.query(
+      `INSERT INTO delivery_orders (customer_id,idempotency_key,request_hash,pickup,dropoff,
+         route_distance_meters,fare_floor_kobo,offered_fare_kobo,status,assigned_rider_id,agreed_fare_kobo,assigned_at,payment_method)
+       VALUES ($1,$2,'test',ST_GeogFromText('POINT(7.01 4.81)'),ST_GeogFromText('POINT(7.02 4.82)'),
+         1000,15000,200000,'assigned',$3,200000,now(),'digital') RETURNING id`, [customer.id, randomUUID(), rider.id],
+    );
+    const path = '/trips/' + trip.id;
+    const checkout = await request(path + '/payment/checkout', customer.token, 'POST');
+    assert.equal(checkout.status, 200, JSON.stringify(checkout.body));
+    return { id: trip.id as string, path, reference: checkout.body.reference as string };
+  }
+  const chargedAtBachs = (reference: string) => {
+    const payment = collections.get(reference)!;
+    sessions.set(payment.checkout, { checkout_id: payment.checkout, reference, status: 'SUCCEEDED', charge: {
+      id: payment.charge, status: 'SUCCEEDED', amount: payment.amount, currency: 'NGN', settlement_currency: 'NGN',
+    } });
+  };
+  const expiredAtBachs = (reference: string) => {
+    const { checkout } = collections.get(reference)!;
+    sessions.set(checkout, { checkout_id: checkout, reference, status: 'expired', charge: null });
+  };
+  const resolve = (id: string, action: string, token = admin.token) =>
+    request(`/admin/trips/${id}/resolve`, token, 'POST', { action });
+  const health = async () => (await request('/admin/payments/operations', admin.token)).body;
+
+  assert.equal((await request('/admin/payments/operations', rider.token)).status, 403);
+  assert.equal((await request('/orders', customer.token, 'POST', {
+    pickup: { latitude: 4.81, longitude: 7.01 }, dropoff: { latitude: 4.82, longitude: 7.02 }, offeredFareKobo: 2000000,
+  }, { 'Idempotency-Key': randomUUID() })).status, 400, 'An order must say how it is paid');
+
+  // A webhook never arrives, and the customer taps Check payment.
+  const lost = await assignedTrip();
+  assert.equal((await request(lost.path + '/payment/verify', customer.token, 'POST')).body.collected, false);
+  sessions.set(collections.get(lost.reference)!.checkout, { checkout_id: collections.get(lost.reference)!.checkout,
+    reference: lost.reference, status: 'SUCCEEDED', charge: { id: 'not-a-charge', status: 'SUCCEEDED' } });
+  assert.equal((await request(lost.path + '/payment/verify', customer.token, 'POST')).body.collected, false,
+    'An unexpected provider answer never marks a payment as collected');
+  chargedAtBachs(lost.reference);
+  assert.equal((await request(lost.path + '/payment/verify', customer.token, 'POST')).body.collected, true);
+  assert.equal((await webhook(lost.reference)).status, 200, 'A late webhook changes nothing');
+  const collectedOnce = await db.query("SELECT 1 FROM payment_ledger WHERE order_id=$1 AND kind='collection'", [lost.id]);
+  assert.equal(collectedOnce.rowCount, 1);
+  assert.equal((await request(lost.path + '/pickup', rider.token, 'POST')).status, 200);
+
+  // The rider vanishes with a paid parcel: only support can end it, and the customer is refunded.
+  assert.equal((await request(lost.path + '/cancel', rider.token, 'POST')).body.status, 'support_requested');
+  assert.equal((await resolve(lost.id, 'reopen')).status, 409, 'A picked-up trip cannot go back to other riders');
+  assert.equal((await resolve(lost.id, 'cancel', rider.token)).status, 403);
+  const refundsBefore = posts.refunds;
+  assert.equal((await resolve(lost.id, 'cancel')).status, 200);
+  await settlePayments();
+  assert.equal(posts.refunds, refundsBefore + 1);
+  assert.equal((await request(lost.path + '/payment', customer.token)).body.payment.refundState, 'succeeded');
+
+  // The worker finds a lost webhook without anyone asking.
+  const swept = await assignedTrip();
+  chargedAtBachs(swept.reference);
+  await db.query('UPDATE trip_payments SET last_reconciled_at=NULL');
+  await reconcileCollections();
+  assert.equal((await request(swept.path, rider.token)).body.trip.paymentPending, false);
+  assert.equal((await resolve(swept.id, 'reopen')).status, 409, 'A paid trip is refunded, never reassigned');
+
+  // Paid no-show: staff see it and decide. Here the parcel was delivered after all.
+  await db.query("UPDATE delivery_orders SET status='customer_unavailable' WHERE id=$1", [swept.id]);
+  const alerts = (await request('/trips/recovery-alerts', admin.token)).body.alerts;
+  assert.ok(alerts.some((alert: { id: string; paymentCollected: boolean }) => alert.id === swept.id && alert.paymentCollected));
+  assert.equal((await resolve(swept.id, 'complete')).status, 200);
+  assert.equal((await request(swept.path, rider.token)).body.trip.status, 'completed');
+
+  // An abandoned checkout no longer traps the rider.
+  const abandoned = await assignedTrip();
+  assert.equal((await request(abandoned.path + '/cancel', rider.token, 'POST')).body.status, 'support_requested');
+  assert.equal((await resolve(abandoned.id, 'reopen')).status, 409, 'An open checkout could still be paid');
+  expiredAtBachs(abandoned.reference);
+  assert.equal((await resolve(abandoned.id, 'complete')).status, 409, 'An unpaid card trip cannot be completed');
+  assert.equal((await resolve(abandoned.id, 'reopen')).status, 200);
+  const { rows: [reopened] } = await db.query(
+    'SELECT status,assigned_rider_id,(SELECT count(*)::int FROM trip_payments WHERE order_id=o.id) AS payments FROM delivery_orders o WHERE id=$1',
+    [abandoned.id],
+  );
+  assert.deepEqual(reopened, { status: 'pending_dispatch', assigned_rider_id: null, payments: 0 });
+  await db.query("UPDATE delivery_orders SET status='expired' WHERE id=$1", [abandoned.id]);
+
+  // An expired checkout gets a fresh one instead of a dead link.
+  const stale = await assignedTrip();
+  await db.query("UPDATE trip_payments SET checkout_expires_at=now()-interval '1 minute' WHERE order_id=$1", [stale.id]);
+  assert.equal((await request(stale.path + '/payment/checkout', customer.token, 'POST')).status, 409,
+    'A session Bachs has not closed may still be paid');
+  expiredAtBachs(stale.reference);
+  const renewed = await request(stale.path + '/payment/checkout', customer.token, 'POST');
+  assert.equal(renewed.status, 200);
+  assert.notEqual(renewed.body.reference, stale.reference);
+  assert.equal((await webhook(renewed.body.reference)).status, 200);
+
+  // A trip ended away from the drop-off waits for staff before paying out.
+  assert.equal((await request(stale.path + '/pickup', rider.token, 'POST')).status, 200);
+  assert.equal((await request(stale.path + '/complete', rider.token, 'POST')).status, 200);
+  await db.query("UPDATE delivery_orders SET completed_at='2025-01-02 22:59:59+00' WHERE id=$1", [stale.id]);
+  const payoutsBefore = posts.payouts;
+  await settlePayments();
+  assert.equal(posts.payouts, payoutsBefore, 'No payout without a location check');
+  assert.ok((await health()).heldPayouts.some((held: { orderId: string }) => held.orderId === stale.id));
+  assert.equal((await request(`/admin/payments/${stale.id}/release-payout`, rider.token, 'POST')).status, 403);
+  assert.equal((await request(`/admin/payments/${stale.id}/release-payout`, admin.token, 'POST')).status, 200);
+  await settlePayments();
+  await db.query("UPDATE payment_operations SET last_attempt_at='-infinity' WHERE order_id=$1", [stale.id]);
+  await settlePayments();
+  assert.equal(posts.payouts, payoutsBefore + 1);
+  assert.equal((await health()).heldPayouts.some((held: { orderId: string }) => held.orderId === stale.id), false);
+
+  // A changed bank destination stops a payout in front of staff, instead of retrying silently.
+  await db.query("UPDATE payment_operations SET state='needs_review' WHERE order_id=$1 AND kind='payout'", [stale.id]);
+  assert.ok((await health()).operations.some((item: { orderId: string; state: string }) =>
+    item.orderId === stale.id && item.state === 'needs_review'));
+  console.log('Lost webhooks, abandoned checkouts, staff trip resolution, held payouts, and payment health passed');
   console.log('Cash commission accrual, overdue dispatch block, Bachs repayment, and audited manual reconciliation passed');
   console.log('Checkout, signed collection, Lagos cutoff, idempotent Connect credit, bank payout, dispute holds, and refunds passed');
 } finally {

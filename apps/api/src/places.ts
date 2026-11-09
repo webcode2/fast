@@ -1,6 +1,7 @@
 import type { IncomingMessage } from 'node:http';
 import { authenticatedAccount, limited } from './auth.ts';
 import { point } from './orders.ts';
+import { clientAddress } from './runtime.ts';
 import type { Point } from './routing.ts';
 
 export type Place = Point & { name: string; detail: string };
@@ -56,7 +57,7 @@ export async function places(request: IncomingMessage, target: string) {
     return send(400, { error: 'Provide a valid place search' });
   }
   // Search runs as the customer types, so it allows more requests than quotes.
-  const bucket = account ? `places:${account.id}` : `guest-places:${request.socket.remoteAddress ?? 'unknown'}`;
+  const bucket = account ? `places:${account.id}` : `guest-places:${clientAddress(request)}`;
   if (await limited(bucket, account ? 300 : 60)) return send(429, { error: 'Too many place requests' });
   try {
     return url.pathname === '/places/search'

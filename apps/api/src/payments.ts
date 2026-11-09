@@ -1,8 +1,9 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { authenticatedAccount, db, limited, readJson, readRaw } from './auth.ts';
 import { uuid } from './orders.ts';
 import { bachs, bachsKey, isProviderId, naira } from './bachs.ts';
+import { describeError } from './runtime.ts';
 import { hasStaffPermission } from './staff.ts';
 import { commissionKobo } from './commission.ts';
 import { settleCashCollection } from './cash-commission.ts';
@@ -11,6 +12,8 @@ import { payoutDueAt } from './payment-settlement.ts';
 const send = (status: number, body: object) => ({ status, body });
 
 const unavailable = () => send(409, { error: 'This trip is not eligible for checkout' });
+const staleHours = 24;
+const workerStaleMinutes = 5;
 
 async function collect(data: Record<string, unknown>) {
   const reference = data.reference;
@@ -34,6 +37,89 @@ async function collect(data: Record<string, unknown>) {
   if (result.rowCount) return true;
   const existing = await db.query('SELECT 1 FROM trip_payments WHERE reference=$1 AND charge_id=$2', [reference, data.charge_id]);
   return Boolean(existing.rowCount);
+}
+
+/**
+ * Reads a checkout session as a collection event. collect() applies the same strict
+ * checks as a signed webhook, so an unexpected shape changes nothing.
+ */
+function sessionAsCollection(session: Record<string, any>) {
+  const charge = session.charge && typeof session.charge === 'object' ? session.charge : null;
+  return {
+    reference: session.reference,
+    checkout_id: session.checkout_id,
+    charge_id: charge?.id ?? session.charge_id ?? (typeof session.charge === 'string' ? session.charge : undefined),
+    status: charge?.status ?? session.status,
+    amount: charge?.amount ?? session.amount ?? session.pricing?.amount,
+    currency: charge?.currency ?? session.currency ?? session.pricing?.currency,
+    settlement_currency: charge?.settlement_currency ?? session.settlement_currency,
+  };
+}
+
+/** Asks Bachs about a payment whose webhook may have been lost. True when it is collected. */
+export async function reconcileCollection(orderId: string) {
+  const { rows: [payment] } = await db.query(
+    `UPDATE trip_payments SET last_reconciled_at=clock_timestamp() WHERE order_id=$1
+     RETURNING reference,checkout_id,collected_at`, [orderId],
+  );
+  if (!payment) return false;
+  if (payment.collected_at) return true;
+  if (!payment.checkout_id) return false;
+  const session = await bachs('/checkout-sessions/' + payment.checkout_id);
+  if (session?.checkout_id !== payment.checkout_id || session.reference !== payment.reference) return false;
+  const event = sessionAsCollection(session);
+  if (!event.charge_id) return false;
+  if (!await collect(event)) {
+    console.error(`Checkout session did not match its payment: order=${orderId}`);
+    return false;
+  }
+  const { rows: [after] } = await db.query('SELECT collected_at FROM trip_payments WHERE order_id=$1', [orderId]);
+  return Boolean(after?.collected_at);
+}
+
+/** True only when Bachs confirms the session ended with no charge, so it can't be paid later. */
+export async function checkoutIsClosed(checkoutId: string) {
+  const session = await bachs('/checkout-sessions/' + checkoutId);
+  return session?.checkout_id === checkoutId && session.status === 'expired' && session.charge === null;
+}
+
+/** Worker sweep for webhooks that never arrived. */
+export async function reconcileCollections() {
+  const { rows } = await db.query(
+    `SELECT order_id FROM trip_payments WHERE collected_at IS NULL AND checkout_id IS NOT NULL
+       AND COALESCE(last_reconciled_at,'-infinity'::timestamptz)<clock_timestamp()-interval '2 minutes'
+     ORDER BY last_reconciled_at NULLS FIRST,order_id LIMIT 25`,
+  );
+  for (const { order_id: id } of rows) {
+    await reconcileCollection(id).catch((error) =>
+      console.error(`Collection check failed: order=${id} ${describeError(error)}`));
+  }
+  return rows.length;
+}
+
+async function paymentHealth() {
+  const [{ rows: operations }, { rows: held }, { rows: workers }] = await Promise.all([
+    db.query(
+      `SELECT order_id AS "orderId",kind,state,amount_kobo AS "amountKobo",last_attempt_at AS "lastAttemptAt"
+       FROM payment_operations
+       WHERE state='needs_review' OR (state='pending' AND created_at<clock_timestamp()-interval '${staleHours} hours')
+       ORDER BY state,created_at LIMIT 100`,
+    ),
+    db.query(
+      `SELECT o.id AS "orderId",p.amount_kobo-p.commission_kobo AS "amountKobo",o.completed_at AS "completedAt"
+       FROM delivery_orders o JOIN trip_payments p ON p.order_id=o.id
+       WHERE o.status='completed' AND o.completed_near_dropoff=false AND o.payout_released_at IS NULL
+         AND p.collected_at IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM payment_operations x WHERE x.order_id=o.id AND x.kind='payout')
+       ORDER BY o.completed_at LIMIT 100`,
+    ),
+    db.query(
+      `SELECT worker,beat_at AS "beatAt",last_failed_at AS "lastFailedAt",
+         beat_at<clock_timestamp()-interval '${workerStaleMinutes} minutes' AS stale
+       FROM worker_heartbeats ORDER BY worker`,
+    ),
+  ]);
+  return { operations, heldPayouts: held, workers };
 }
 
 export async function payments(request: IncomingMessage, path: string) {
@@ -61,6 +147,22 @@ export async function payments(request: IncomingMessage, path: string) {
   }
   const user = await authenticatedAccount(request);
   if (!user) return send(401, { error: 'Sign in required' });
+
+  if (path === '/admin/payments/operations' && request.method === 'GET') {
+    if (!await hasStaffPermission(user, 'recovery_operator')) return send(403, { error: 'Recovery operator access required' });
+    return send(200, await paymentHealth());
+  }
+  const [, heldOrder] = path.match(/^\/admin\/payments\/([^/]+)\/release-payout$/) ?? [];
+  if (heldOrder && request.method === 'POST') {
+    if (!await hasStaffPermission(user, 'administrator')) return send(403, { error: 'Administrator access required' });
+    if (!uuid.test(heldOrder)) return send(404, { error: 'Trip not found' });
+    const released = await db.query(
+      `UPDATE delivery_orders SET payout_released_at=clock_timestamp(),payout_released_by=$2
+       WHERE id=$1 AND status='completed' AND completed_near_dropoff=false AND payout_released_at IS NULL`,
+      [heldOrder, user.id],
+    );
+    return released.rowCount ? send(200, { ok: true }) : send(409, { error: 'This payout is not on hold' });
+  }
 
   const [, riderId] = path.match(/^\/admin\/payments\/riders\/([^/]+)\/recipient$/) ?? [];
   if (riderId && request.method === 'PUT') {
@@ -111,7 +213,9 @@ export async function payments(request: IncomingMessage, path: string) {
       [id, user.id],
     );
     if (!payment) return send(404, { error: 'Payment not found' });
-    return send(200, { collected: Boolean(payment.collected_at) });
+    if (payment.collected_at) return send(200, { collected: true });
+    // A customer asking is the fastest signal that a webhook was lost.
+    return send(200, { collected: await reconcileCollection(id) });
   }
 
   const client = await db.connect();
@@ -129,7 +233,7 @@ export async function payments(request: IncomingMessage, path: string) {
     const reserved = await client.query(
       `INSERT INTO trip_payments (order_id,rider_id,reference,amount_kobo,commission_kobo)
        VALUES ($1,$2,$3,$4,$5) ON CONFLICT (order_id) DO UPDATE SET reference=trip_payments.reference
-       RETURNING reference,checkout_url,collected_at`,
+       RETURNING reference,checkout_id,checkout_url,checkout_expires_at,collected_at`,
       [id, trip.assigned_rider_id, 'fl-' + id, amount, commissionKobo(amount)],
     );
     payment = reserved.rows[0];
@@ -139,7 +243,20 @@ export async function payments(request: IncomingMessage, path: string) {
     try { await client.query('ROLLBACK'); } finally { client.release(); }
   }
   if (payment.collected_at) return send(200, { collected: true });
-  if (payment.checkout_url) {
+  if (payment.checkout_id && payment.checkout_expires_at && Date.now() >= Number(payment.checkout_expires_at)) {
+    if (await reconcileCollection(id)) return send(200, { collected: true });
+    if (!await checkoutIsClosed(payment.checkout_id)) {
+      return send(409, { error: 'The previous checkout is still being confirmed. Please try again shortly.' });
+    }
+    // Bachs replays a reference, so a new attempt needs a new one.
+    const { rows: [fresh] } = await db.query(
+      `UPDATE trip_payments SET reference=$2,checkout_id=NULL,checkout_url=NULL,checkout_expires_at=NULL
+       WHERE order_id=$1 AND collected_at IS NULL AND checkout_id=$3 RETURNING reference`,
+      [id, 'fl-' + randomUUID(), payment.checkout_id],
+    );
+    if (!fresh) return send(409, { error: 'Checkout changed. Please try again.' });
+    payment = { reference: fresh.reference };
+  } else if (payment.checkout_url) {
     return send(200, { authorizationUrl: payment.checkout_url, reference: payment.reference });
   }
   const checkout = await bachs('/checkout-sessions', {
@@ -160,8 +277,9 @@ export async function payments(request: IncomingMessage, path: string) {
       : send(503, { error: 'Checkout unavailable. Retry or contact support.' });
   }
   const saved = await db.query(
-    `UPDATE trip_payments SET checkout_url=CASE WHEN collected_at IS NULL THEN $2 END,checkout_id=$3
-     WHERE order_id=$1 AND (checkout_id IS NULL OR checkout_id=$3)`, [id, checkout.checkout_url, checkout.checkout_id],
+    `UPDATE trip_payments SET checkout_url=CASE WHEN collected_at IS NULL THEN $2 END,checkout_id=$3,checkout_expires_at=$4
+     WHERE order_id=$1 AND (checkout_id IS NULL OR checkout_id=$3)`,
+    [id, checkout.checkout_url, checkout.checkout_id, Number.isFinite(Date.parse(checkout.expires_at)) ? checkout.expires_at : null],
   );
   if (!saved.rowCount) return send(409, { error: 'Checkout does not match the reserved payment' });
   return send(200, { authorizationUrl: checkout.checkout_url, reference: payment.reference });

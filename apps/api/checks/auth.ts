@@ -52,8 +52,13 @@ try {
     request('/login', { email, password, client: 'mobile' }),
     request('/login', { email, password, client: 'mobile' }),
   ]);
-  assert.deepEqual(attempts.map(({ status }) => status).sort(), [200, 409]);
-  const token = attempts.find(({ status }) => status === 200)!.body.token as string;
+  assert.deepEqual(attempts.map(({ status }) => status), [200, 200], 'A new device can always sign in');
+  const live = await Promise.all(attempts.map(({ body }) => request('/profile', undefined, body.token)));
+  assert.deepEqual(live.map(({ status }) => status).sort(), [200, 401], 'Only one device stays signed in');
+  const oldDevice = attempts[live[0].status === 200 ? 0 : 1].body.token as string;
+  const newDevice = await request('/login', { email, password, client: 'mobile' });
+  assert.equal((await request('/profile', undefined, oldDevice)).status, 401, 'The newest sign-in replaces the old device');
+  const token = newDevice.body.token as string;
   assert.equal((await request('/profile')).status, 401);
   assert.equal((await request('/profile', { name: 'Updated rider' }, token, 'PATCH')).body.user.name, 'Updated rider');
   for (const purpose of ['email', 'phone']) {

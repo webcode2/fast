@@ -195,7 +195,7 @@ try {
   const outsider = await createAccount('rider', '+2348012345803');
   const { rows: [trip] } = await db.query(
     `INSERT INTO delivery_orders (customer_id,idempotency_key,request_hash,pickup,dropoff,
-       route_distance_meters,fare_floor_kobo,offered_fare_kobo,status,assigned_rider_id,agreed_fare_kobo,assigned_at)
+       route_distance_meters,fare_floor_kobo,offered_fare_kobo,status,assigned_rider_id,agreed_fare_kobo,assigned_at,payment_method)
      VALUES ($1,gen_random_uuid(),'test',ST_GeogFromText('POINT(7.01 4.81)'),
        ST_GeogFromText('POINT(7.02 4.82)'),1000,15000,20000,'assigned',$2,20000,clock_timestamp())
      RETURNING id`, [customer.user.id, rider.user.id],

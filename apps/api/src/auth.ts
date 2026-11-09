@@ -2,8 +2,21 @@ import { createHash, createHmac, randomBytes, randomInt, scrypt, timingSafeEqual
 import type { IncomingMessage } from 'node:http';
 import { promisify } from 'node:util';
 import pg from 'pg';
+import { clientAddress, describeError } from './runtime.ts';
 
-export const db = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const timeoutMs = (name: string, fallback: number) => {
+  const value = Number(process.env[name]);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+};
+
+export const db = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: timeoutMs('PG_POOL_MAX', 20),
+  connectionTimeoutMillis: timeoutMs('PG_CONNECT_TIMEOUT_MS', 3000),
+  statement_timeout: timeoutMs('PG_STATEMENT_TIMEOUT_MS', 10_000),
+});
+// Without a listener, a database restart would crash the process through an idle client.
+db.on('error', (error) => console.error(`Idle database client failed: ${describeError(error)}`));
 const derive = promisify(scrypt);
 const profile = `id, role, email, phone, email_verified, phone_verified,
   (SELECT display_name FROM account_profiles WHERE account_id=accounts.id) AS name`;
@@ -13,7 +26,7 @@ const failure = (status: number, error: string) => ({ status, body: { error } })
 const success = (body: object = { ok: true }, status = 200) => ({ status, body });
 const validPassword = (value: string) => value.length >= 12 && Buffer.byteLength(value) <= 128;
 const validEmail = (value: string) => value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-const validPhone = (value: string) => /^\+[1-9]\d{7,14}$/.test(value);
+export const validPhone = (value: string) => /^\+[1-9]\d{7,14}$/.test(value);
 const equal = (a: string, b: string) =>
   a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
@@ -85,6 +98,9 @@ async function sendCode(account: { id: string; phone: string; email: string }, p
   if (!response.ok) throw new Error('Auth delivery failed');
 }
 
+const sessionHours = 24;
+const sessionRenewBelowHours = 12;
+
 function sessionHash(request: IncomingMessage) {
   const token = request.headers.authorization?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
   return token ? digest(token) : '';
@@ -94,15 +110,21 @@ export async function authenticatedAccount(request: IncomingMessage) {
   const hash = sessionHash(request);
   if (!hash) return undefined;
   const { rows: [account] } = await db.query(
-    'SELECT accounts.* FROM accounts JOIN auth_sessions ON account_id=id WHERE token_hash=$1 AND expires_at>now() AND deleted_at IS NULL',
+    `SELECT accounts.*, auth_sessions.expires_at<now()+interval '${sessionRenewBelowHours} hours' AS session_renewal_due
+     FROM accounts JOIN auth_sessions ON account_id=id
+     WHERE token_hash=$1 AND auth_sessions.expires_at>now() AND deleted_at IS NULL`,
     [hash],
   );
+  // Sessions end after a day idle, not mid-delivery.
+  if (account?.session_renewal_due) {
+    await db.query(`UPDATE auth_sessions SET expires_at=now()+interval '${sessionHours} hours' WHERE token_hash=$1`, [hash]);
+  }
   return account;
 }
 
 export async function auth(request: IncomingMessage, path: string) {
   const method = request.method;
-  const ip = request.socket.remoteAddress ?? 'unknown';
+  const ip = clientAddress(request);
   const input = method === 'GET' ? {} : await readJson(request).catch(() => null);
   if (!input) return failure(400, 'Invalid request body');
   const get = (key: string) => typeof input[key] === 'string' ? input[key] : '';
@@ -117,9 +139,11 @@ export async function auth(request: IncomingMessage, path: string) {
   if (publicRoutes.includes(path) && method === 'POST') {
     if (await limited(`public:${ip}`, 120)) return failure(429, 'Try again later');
     if (!validEmail(email)) return failure(400, 'Enter a valid email address');
-    if (await limited(`${path}:${digest(email)}`, path === '/auth/login' ? 10 : 5)) {
-      return failure(429, 'Try again later');
-    }
+    // Per address, so a stranger guessing passwords can't lock the real owner out.
+    const blocked = path === '/auth/login'
+      ? await limited(`${path}:${ip}:${digest(email)}`, 10) || await limited(`${path}:${digest(email)}`, 100)
+      : await limited(`${path}:${digest(email)}`, 5);
+    if (blocked) return failure(429, 'Try again later');
     if (path === '/auth/register') {
       if (!validPassword(password) || !validPhone(phone) || !name || name.length > 100 ||
           !['customer', 'rider'].includes(role)) {
@@ -169,14 +193,13 @@ export async function auth(request: IncomingMessage, path: string) {
         `SELECT ${profile}, password_hash FROM accounts WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, [account.id],
       );
       if (current?.password_hash !== hash) return failure(401, 'Invalid credentials');
-      if (current.role === 'rider') {
-        const active = await client.query(
-          'SELECT 1 FROM auth_sessions WHERE account_id=$1 AND expires_at>now()', [current.id],
-        );
-        if (active.rowCount) return failure(409, 'Sign out on your other device before signing in');
-      }
+      // One active device per account: the newest sign-in replaces any other session.
       const token = randomBytes(32).toString('hex');
-      await client.query('INSERT INTO auth_sessions VALUES ($1,$2,now()+interval \'1 day\')', [digest(token), current.id]);
+      await client.query(
+        `INSERT INTO auth_sessions (token_hash,account_id,expires_at) VALUES ($1,$2,now()+interval '${sessionHours} hours')
+         ON CONFLICT (account_id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at`,
+        [digest(token), current.id],
+      );
       await client.query('COMMIT');
       const { password_hash: _, ...user } = current;
       return success({ token, user });

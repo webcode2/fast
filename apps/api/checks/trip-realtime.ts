@@ -39,9 +39,9 @@ try {
   const rider = await account('rider');
   const { rows: [trip] } = await db.query(
     `INSERT INTO delivery_orders (customer_id,idempotency_key,request_hash,pickup,dropoff,
-        route_distance_meters,fare_floor_kobo,offered_fare_kobo,status,assigned_rider_id,agreed_fare_kobo,assigned_at)
+        route_distance_meters,fare_floor_kobo,offered_fare_kobo,status,assigned_rider_id,agreed_fare_kobo,assigned_at,payment_method)
      VALUES ($1,gen_random_uuid(),'test','POINT(7 4.8)','POINT(7.01 4.81)',
-        1800,27000,30000,'assigned',$2,30000,clock_timestamp()) RETURNING id`, [customer.id, rider.id]);
+        1800,27000,30000,'assigned',$2,30000,clock_timestamp(),'cash') RETURNING id`, [customer.id, rider.id]);
   const path = '/trips/' + trip.id;
   const url = 'ws://127.0.0.1:' + address.port + path + '/comms/ws';
   const outsider = await account('rider');

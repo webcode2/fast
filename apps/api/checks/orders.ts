@@ -50,7 +50,7 @@ try {
   assert.equal(login.status, 200);
   token = login.body.token;
   const key = randomUUID();
-  const payload = { pickup, dropoff, offeredFareKobo: 20_000, distanceMeters: 1 };
+  const payload = { pickup, dropoff, offeredFareKobo: 20_000, distanceMeters: 1, paymentMethod: 'cash' };
   assert.equal((await post('/orders', payload, key)).status, 403);
   await db.query('UPDATE accounts SET phone_verified=true WHERE email=$1', [email]);
   assert.equal((await post('/orders/quote', { pickup: { ...pickup, latitude: 91 }, dropoff })).status, 400);

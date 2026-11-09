@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
-import { authenticatedAccount, db, limited, readJson } from './auth.ts';
+import { authenticatedAccount, db, limited, readJson, validPhone } from './auth.ts';
 import { uuid } from './orders.ts';
+import { clientAddress } from './runtime.ts';
 import { staffPermissions } from './staff.ts';
 
 const send = (status: number, body: object) => ({ status, body });
@@ -22,7 +23,7 @@ export function parseContact(raw: unknown) {
       : null;
   }
   const digits = value.replace(/[\s()-]/g, '');
-  const phone = /^\+[1-9]\d{7,14}$/.test(digits) ? digits
+  const phone = validPhone(digits) ? digits
     : /^234[789][01]\d{8}$/.test(digits) ? `+${digits}`
     : /^0[789][01]\d{8}$/.test(digits) ? `+234${digits.slice(1)}`
     : /^[789][01]\d{8}$/.test(digits) ? `+234${digits}`
@@ -61,7 +62,7 @@ export async function waitlistSignup(request: IncomingMessage) {
   if (input.role !== 'customer' && input.role !== 'rider') return send(400, { error: 'Choose how you plan to use the app.' });
   if (input.consent !== true) return send(400, { error: 'Please agree so we can contact you at launch.' });
 
-  const address = request.socket.remoteAddress ?? 'unknown';
+  const address = clientAddress(request);
   const contactKey = createHash('sha256').update(parsed.contact).digest('hex');
   if (await limited(`waitlist:${address}`, signupsPerAddress) || await limited(`waitlist:${contactKey}`, signupsPerContact)) {
     return send(429, { error: 'Too many attempts. Please try again later.' });

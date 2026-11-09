@@ -1,10 +1,14 @@
 import { createHash } from 'node:crypto';
 import { db } from './auth.ts';
-import { bachs, bachsKey, isProviderId, naira } from './bachs.ts';
+import { bachs, bachsKey, BachsRequestError, isProviderId, naira } from './bachs.ts';
+import { describeError } from './runtime.ts';
 
 const lock = '649012203';
 export const payoutDueAt = "(((o.completed_at AT TIME ZONE 'Africa/Lagos')::date + 1 + time '06:00') AT TIME ZONE 'Africa/Lagos')";
 const noHold = "NOT EXISTS (SELECT 1 FROM trip_disputes d WHERE d.order_id=o.id AND d.status<>'dismissed')";
+// Completed away from the drop-off: staff release these after checking.
+const deliveryTrusted = '(o.completed_near_dropoff IS DISTINCT FROM false OR o.payout_released_at IS NOT NULL)';
+const owedRefund = "(o.status='cancelled' OR EXISTS (SELECT 1 FROM trip_disputes d WHERE d.order_id=o.id AND d.status='upheld'))";
 
 async function postLedger(id: string, kind: 'payout' | 'refund' | 'rider_credit', providerId: string) {
   const client = await db.connect();
@@ -50,18 +54,23 @@ async function review(id: string, kind: string) {
   await db.query("UPDATE payment_operations SET state='needs_review' WHERE order_id=$1 AND kind=$2 AND state='pending'", [id, kind]);
 }
 
+// A dispute hold waits quietly. A changed bank destination needs a person.
 async function payoutCanSend(client: Awaited<ReturnType<typeof db.connect>>, id: string, recipient: string, destination: string) {
   try {
     await client.query('BEGIN');
     await client.query('SELECT id FROM delivery_orders WHERE id=$1 FOR UPDATE', [id]);
-    const eligible = await client.query(
-      `SELECT 1 FROM delivery_orders o JOIN trip_payments p ON p.order_id=o.id
-       JOIN payout_recipients r ON r.rider_id=p.rider_id
-       WHERE o.id=$1 AND r.recipient_code=$2 AND r.destination_code=$3 AND ${noHold}`,
+    const { rows: [state] } = await client.query(
+      `SELECT (r.recipient_code=$2 AND r.destination_code=$3) AS matches, ${noHold} AS unheld
+       FROM delivery_orders o JOIN trip_payments p ON p.order_id=o.id
+       LEFT JOIN payout_recipients r ON r.rider_id=p.rider_id WHERE o.id=$1`,
       [id, recipient, destination],
     );
     await client.query('COMMIT');
-    return Boolean(eligible.rowCount);
+    if (state?.matches !== true) {
+      await review(id, 'payout');
+      return false;
+    }
+    return state.unheld === true;
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -76,14 +85,14 @@ export async function settlePayments() {
     if (!state.acquired) return { attempted: 0 };
 
     const { rows: candidates } = await db.query(
-      `SELECT p.order_id,'refund' AS kind FROM trip_payments p JOIN trip_disputes d ON d.order_id=p.order_id
-       WHERE p.collected_at IS NOT NULL AND d.status='upheld'
+      `SELECT p.order_id,'refund' AS kind FROM trip_payments p JOIN delivery_orders o ON o.id=p.order_id
+       WHERE p.collected_at IS NOT NULL AND ${owedRefund}
          AND NOT EXISTS (SELECT 1 FROM payment_operations x WHERE x.order_id=p.order_id AND x.kind='refund')
        UNION ALL
        SELECT p.order_id,'payout' FROM trip_payments p
        JOIN delivery_orders o ON o.id=p.order_id JOIN payout_recipients r ON r.rider_id=p.rider_id
        WHERE p.collected_at IS NOT NULL AND o.status='completed' AND ${payoutDueAt}<=clock_timestamp()
-         AND ${noHold}
+         AND ${noHold} AND ${deliveryTrusted}
          AND NOT EXISTS (SELECT 1 FROM payment_operations x WHERE x.order_id=p.order_id AND x.kind='payout')
        LIMIT 25`,
     );
@@ -92,8 +101,8 @@ export async function settlePayments() {
       try {
         await guard.query('SELECT 1 FROM delivery_orders WHERE id=$1 FOR UPDATE', [candidate.order_id]);
         const eligible = candidate.kind === 'payout'
-          ? `o.status='completed' AND ${payoutDueAt}<=clock_timestamp() AND r.recipient_code IS NOT NULL AND ${noHold}`
-          : "EXISTS (SELECT 1 FROM trip_disputes d WHERE d.order_id=o.id AND d.status='upheld')";
+          ? `o.status='completed' AND ${payoutDueAt}<=clock_timestamp() AND r.recipient_code IS NOT NULL AND ${noHold} AND ${deliveryTrusted}`
+          : owedRefund;
         await guard.query(
           `INSERT INTO payment_operations (order_id,kind,reference,amount_kobo,recipient_code,destination_code,last_attempt_at)
            SELECT p.order_id,$2,$2||'-'||p.order_id::text,
@@ -180,8 +189,10 @@ export async function settlePayments() {
         } else if (payout.status === 'completed') {
           await postLedger(id, kind, payout.id);
         }
-      } catch {
-        console.error('Payment operation will be reconciled on retry');
+      } catch (error) {
+        console.error(`Payment operation failed: order=${id} kind=${kind} ${describeError(error)}`);
+        // Bachs rejected the request itself, so retrying would repeat the same answer.
+        if (error instanceof BachsRequestError && (error.status === 400 || error.status === 422)) await review(id, kind);
       }
     }
     return { attempted: operations.length };

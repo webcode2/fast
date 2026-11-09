@@ -1,4 +1,6 @@
 export function bachsKey() {
+  // Sandbox "collections" are not real money, so they must never unlock real deliveries.
+  if (process.env.NODE_ENV === 'production') throw new Error('Bachs sandbox credentials are not allowed in production');
   const secret = process.env.BACHS_SANDBOX_SECRET_KEY;
   if (!secret || !/^sk_sandbox_[A-Za-z0-9_-]+$/.test(secret)) throw new Error('Bachs sandbox credentials required');
   return secret;

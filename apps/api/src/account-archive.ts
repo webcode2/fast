@@ -32,14 +32,25 @@ export async function maintainAccounts() {
              'messages',COALESCE((SELECT jsonb_agg(to_jsonb(m)-'sender_id') FROM trip_messages m WHERE m.sender_id=a.id),'[]'::jsonb),
              'reviews',COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM trip_reviews r
                JOIN delivery_orders o ON o.id=r.order_id WHERE o.customer_id=a.id),'[]'::jsonb),
+             'riderReports',COALESCE((SELECT jsonb_agg(to_jsonb(i)-'resolved_by') FROM trip_issues i
+               WHERE i.reporter_id=a.id),'[]'::jsonb),
              'reports',COALESCE((SELECT jsonb_agg(to_jsonb(d)-'resolved_by') FROM trip_disputes d
                JOIN delivery_orders o ON o.id=d.order_id WHERE o.customer_id=a.id),'[]'::jsonb),
              'deliveryLocations',COALESCE((SELECT jsonb_agg(jsonb_build_object('orderId',o.id,
-               'pickup',ST_AsGeoJSON(o.pickup)::jsonb,'dropoff',ST_AsGeoJSON(o.dropoff)::jsonb))
+               'pickup',ST_AsGeoJSON(o.pickup)::jsonb,'dropoff',ST_AsGeoJSON(o.dropoff)::jsonb,
+               'pickupLabel',o.pickup_label,'dropoffLabel',o.dropoff_label,'routePath',o.route_path))
                FROM delivery_orders o WHERE o.customer_id=a.id),'[]'::jsonb))::text,$2,'cipher-algo=aes256')
          FROM accounts a WHERE a.id=$1 AND a.deleted_at+interval '3600 hours'>clock_timestamp()`, [id, key],
       );
-      await client.query('DELETE FROM trip_messages WHERE sender_id=$1', [id]);
+      // Messages from either side of the account's trips can contain its addresses.
+      await client.query(
+        `DELETE FROM trip_messages WHERE sender_id=$1 OR order_id IN
+           (SELECT id FROM delivery_orders WHERE customer_id=$1 OR assigned_rider_id=$1)`, [id],
+      );
+      await client.query(
+        `UPDATE trip_issues SET details='Removed with account' WHERE details<>'' AND (reporter_id=$1 OR order_id IN
+           (SELECT id FROM delivery_orders WHERE customer_id=$1))`, [id],
+      );
       await client.query(
         "UPDATE trip_reviews r SET comment='' FROM delivery_orders o WHERE o.id=r.order_id AND o.customer_id=$1", [id],
       );
@@ -52,7 +63,7 @@ export async function maintainAccounts() {
         `UPDATE trip_payments p SET checkout_url=NULL FROM delivery_orders o
          WHERE o.id=p.order_id AND o.customer_id=$1`, [id],
       );
-      await client.query('UPDATE delivery_orders SET pickup=NULL,dropoff=NULL WHERE customer_id=$1', [id]);
+      await client.query('UPDATE delivery_orders SET pickup=NULL,dropoff=NULL,pickup_label=NULL,dropoff_label=NULL,route_path=NULL WHERE customer_id=$1', [id]);
       await client.query('DELETE FROM payout_recipients WHERE rider_id=$1', [id]);
       await client.query('UPDATE payment_operations SET recipient_code=$2,destination_code=$2 WHERE order_id IN (SELECT order_id FROM trip_payments WHERE rider_id=$1) AND kind=$3', [id, 'archived', 'payout']);
       await client.query('DELETE FROM rider_identity_checks WHERE rider_id=$1', [id]);

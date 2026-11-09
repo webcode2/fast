@@ -11,7 +11,9 @@
     "start:env": "node --env-file=../../.env src/server.ts",
     "auth:admin": "node --env-file=../../.env src/auth-admin.ts",
     "accounts:maintain": "node --env-file=../../.env src/account-maintenance.ts",
-    "payments:worker": "node --env-file=../../.env src/payment-worker.ts"
+    "payments:worker": "node --env-file=../../.env src/payment-worker.ts",
+    "db:migrate": "node --env-file-if-exists=../../.env src/migrate.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "pg": "^8.23.1",

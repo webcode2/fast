@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { db } from '../src/auth.ts';
 import { server } from '../src/server.ts';
+import { routeUpdatesSettled } from '../src/trip-route.ts';
 
 if (!process.env.DATABASE_URL) throw new Error('Set DATABASE_URL to an isolated, migrated test database');
 process.env.MAPBOX_ACCESS_TOKEN = 'test-token';
@@ -65,7 +66,7 @@ try {
   assert.deepEqual(quote.body.path, [[4.81, 7.01], [4.82, 7.01], [4.82, 7.02]]);
   assert.equal(quote.body.distanceMeters, 1500);
   const placed = await request('/orders', customer.token, 'POST',
-    { pickup, dropoff, offeredFareKobo: 50_000 }, randomUUID());
+    { pickup, dropoff, offeredFareKobo: 50_000, paymentMethod: 'cash' }, randomUUID());
   const id = placed.body.order.id;
   await db.query(
     `UPDATE delivery_orders SET status='picked_up', assigned_rider_id=$2, agreed_fare_kobo=50000,
@@ -79,8 +80,11 @@ try {
   assert.equal(booked.body.route.updatedAt, null);
 
   let at = Date.now() - 60_000;
-  const ping = (location: typeof pickup) =>
-    request(`${trip}/location`, rider.token, 'POST', { location, recordedAtMs: at += 10_000 });
+  const ping = async (location: typeof pickup) => {
+    const result = await request(`${trip}/location`, rider.token, 'POST', { location, recordedAtMs: at += 10_000 });
+    await routeUpdatesSettled();
+    return result;
+  };
 
   routedFrom.length = 0;
   assert.equal((await ping({ latitude: 4.811, longitude: 7.01 })).status, 200);

@@ -2,7 +2,7 @@ import { hasStaffPermission } from './staff.ts';
 import type { IncomingMessage } from 'node:http';
 import { authenticatedAccount, db, limited, readJson } from './auth.ts';
 import { point, uuid } from './orders.ts';
-import { commissionKobo } from './commission.ts';
+import { recordCashCommission } from './cash-commission.ts';
 import { reportTripIssue, staffTripIssues } from './trip-issues.ts';
 import { followRoute, tripRoute } from './trip-route.ts';
 import { gpsDropout, markCustomerUnavailable, recoveryAlerts, reopenTrip } from './trip-recovery.ts';
@@ -11,6 +11,8 @@ const send = (status: number, body: object) => ({ status, body });
 const notFound = () => send(404, { error: 'Trip not found' });
 // Matches the distance that starts the no-show wait at the drop-off.
 const arrivalMeters = 100;
+// Wider than arrival, because a rider may park away from the door.
+const completionNearMeters = 200;
 const fields = `id, status, customer_id AS "customerId", assigned_rider_id AS "riderId",
   (status='assigned' AND (
     (payment_method IS NOT DISTINCT FROM 'digital' AND NOT EXISTS (
@@ -119,7 +121,7 @@ export async function trips(request: IncomingMessage, path: string) {
       [id, account.id, location.longitude, location.latitude, time],
     );
     if (!result.rowCount) return send(409, { error: 'Location rejected or trip unavailable' });
-    await followRoute(id, account.id, location).catch(() => console.error('Trip route update failed'));
+    followRoute(id, account.id, location);
     return send(200, { ok: true });
   }
 
@@ -127,7 +129,10 @@ export async function trips(request: IncomingMessage, path: string) {
   const next = completing ? 'completed' : 'picked_up';
   const previous = completing ? 'picked_up' : 'assigned';
   const transition = completing
-    ? 'completed_at=clock_timestamp(), rider_location=NULL, rider_location_at=NULL, tracking_received_at=NULL, dropoff_wait_started_at=NULL, recovery_requested_at=NULL'
+    ? `completed_at=clock_timestamp(),
+       completed_near_dropoff=COALESCE(rider_location_at>clock_timestamp()-interval '2 minutes'
+         AND ST_DWithin(rider_location, dropoff, ${completionNearMeters}), false),
+       rider_location=NULL, rider_location_at=NULL, tracking_received_at=NULL, dropoff_wait_started_at=NULL, recovery_requested_at=NULL`
     : 'picked_up_at=clock_timestamp()';
   const client = await db.connect();
   let changed;
@@ -146,13 +151,7 @@ export async function trips(request: IncomingMessage, path: string) {
     );
     changed = result.rows[0];
     if (changed?.status === 'completed' && changed.paymentMethod === 'cash') {
-      const amount = commissionKobo(changed.agreedFareKobo);
-      if (amount > 0) await client.query(
-        `INSERT INTO cash_commissions (order_id,rider_id,amount_kobo,business_date,due_at)
-         SELECT id,assigned_rider_id,$2,(completed_at AT TIME ZONE 'Africa/Lagos')::date,
-           (((completed_at AT TIME ZONE 'Africa/Lagos')::date + 1)::timestamp AT TIME ZONE 'Africa/Lagos')
-         FROM delivery_orders WHERE id=$1`, [id, amount],
-      );
+      await recordCashCommission(client, id, changed.agreedFareKobo);
     }
     await client.query('COMMIT');
   } finally {

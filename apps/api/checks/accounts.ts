@@ -76,9 +76,10 @@ try {
   const { rows: [trip] } = await db.query(
     `INSERT INTO delivery_orders (customer_id,idempotency_key,request_hash,pickup,dropoff,
        route_distance_meters,fare_floor_kobo,offered_fare_kobo,status,assigned_rider_id,
-       agreed_fare_kobo,assigned_at,completed_at)
+       agreed_fare_kobo,assigned_at,completed_at,payment_method,pickup_label,dropoff_label,route_path)
      VALUES ($1,gen_random_uuid(),'test',ST_GeogFromText('POINT(7.01 4.81)'),
-       ST_GeogFromText('POINT(7.02 4.82)'),1000,15000,20000,'completed',$2,20000,now(),now())
+       ST_GeogFromText('POINT(7.02 4.82)'),1000,15000,20000,'completed',$2,20000,now(),now(),'cash',
+       'My home street','My office','[[4.81,7.01],[4.82,7.02]]'::jsonb)
      RETURNING id`, [id, rider.id],
   );
   await db.query(
@@ -127,6 +128,11 @@ try {
   assert.equal(exported.body.archive.reviews[0].comment, 'Delivery feedback');
   assert.equal(exported.body.archive.reports[0].details, 'Case details');
   assert.deepEqual(exported.body.archive.deliveryLocations[0].pickup.coordinates, [7.01, 4.81]);
+  assert.equal(exported.body.archive.deliveryLocations[0].pickupLabel, 'My home street');
+  const { rows: [places] } = await db.query(
+    'SELECT pickup_label,dropoff_label,route_path FROM delivery_orders WHERE customer_id=$1', [id],
+  );
+  assert.deepEqual(places, { pickup_label: null, dropoff_label: null, route_path: null }, 'Places leave the live table');
   assert.equal((await db.query('SELECT 1 FROM trip_messages WHERE sender_id=$1', [id])).rowCount, 0);
   const retained = (await db.query(
     `SELECT o.pickup,o.dropoff,r.rating,r.comment,d.details FROM delivery_orders o

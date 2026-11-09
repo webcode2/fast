@@ -54,7 +54,7 @@ try {
   const admin = await actor('admin', 6);
   const pickup = { latitude: 4.81, longitude: 7.01 };
   const dropoff = { latitude: 4.82, longitude: 7.02 };
-  const payload = { pickup, dropoff, offeredFareKobo: 20_000 };
+  const payload = { pickup, dropoff, offeredFareKobo: 20_000, paymentMethod: 'cash' };
   assert.equal((await request('/orders/quote', '', 'POST', payload)).status, 200);
   assert.equal((await request('/orders', '', 'POST', payload)).status, 401);
   const online = { available: true, location: pickup };

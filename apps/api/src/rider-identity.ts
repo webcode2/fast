@@ -141,46 +141,41 @@ export async function riderIdentity(request: IncomingMessage, path: string) {
     return send(400, { error: 'Choose an identity check and confirm consent' });
   }
   if (await limited(`identity-start:${user.id}`, 8)) return send(429, { error: 'Try again later' });
-  const client = await db.connect();
-  try {
-    await client.query('BEGIN');
-    const active = await client.query('SELECT 1 FROM accounts WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [user.id]);
-    if (!active.rowCount) return send(401, { error: 'Sign in required' });
-    const { rows: [existing] } = await client.query(
-      `SELECT *, expires_at>clock_timestamp() AS current FROM rider_identity_checks
-       WHERE rider_id=$1 AND kind=$2 ORDER BY created_at DESC,id DESC LIMIT 1`, [user.id, kind],
-    );
-    if (existing?.status === 'clear' || existing?.status === 'attention' ||
-        (existing?.status === 'pending' && existing.provider_job_id)) {
-      return send(409, { error: 'This check is already complete or in review' });
-    }
-    if (existing?.status === 'pending' && existing.current && existing.verification_url) {
-      return send(200, { url: existing.verification_url });
-    }
-    const id = randomUUID();
-    const providerUser = 'fl_' + id.replaceAll('-', '');
-    const expires = new Date(Date.now() + 30 * 60_000).toISOString();
-    const callbackUrl = new URL(`/identity/smile/callback/${id}/${proof(id, settings.secret)}`, settings.callback);
-    const form = new FormData();
-    form.set('name', kind === 'nin' ? 'Fast Logistics NIN and selfie' : 'Fast Logistics driver licence');
-    form.set('id_types', JSON.stringify([checks[kind]]));
-    form.set('notice_privacy_policy_url', settings.privacy);
-    form.set('is_single_use', 'true');
-    form.set('expires_at', expires);
-    form.set('callback_url', callbackUrl.href);
-    form.set('user_id', providerUser);
-    const link = await smile(settings, '/v3/smile_links', form);
-    if (link?.user_id !== providerUser || typeof link.ref_id !== 'string' || !uuid.test(link.ref_id) ||
-        link.link !== `https://links.usesmileid.com/v3/${settings.partner}/${link.ref_id}`) {
-      return send(503, { error: 'Smile ID did not return a valid verification link' });
-    }
-    await client.query(
-      `INSERT INTO rider_identity_checks (id,rider_id,kind,provider_user_id,provider_link_id,verification_url,expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`, [id,user.id,kind,providerUser,link.ref_id,link.link,expires],
-    );
-    await client.query('COMMIT');
-    return send(201, { url: link.link });
-  } finally {
-    try { await client.query('ROLLBACK'); } finally { client.release(); }
+  const { rows: [existing] } = await db.query(
+    `SELECT *, expires_at>clock_timestamp() AS current FROM rider_identity_checks
+     WHERE rider_id=$1 AND kind=$2 ORDER BY created_at DESC,id DESC LIMIT 1`, [user.id, kind],
+  );
+  if (existing?.status === 'clear' || existing?.status === 'attention' ||
+      (existing?.status === 'pending' && existing.provider_job_id)) {
+    return send(409, { error: 'This check is already complete or in review' });
   }
+  if (existing?.status === 'pending' && existing.current && existing.verification_url) {
+    return send(200, { url: existing.verification_url });
+  }
+  const id = randomUUID();
+  const providerUser = 'fl_' + id.replaceAll('-', '');
+  const expires = new Date(Date.now() + 30 * 60_000).toISOString();
+  const callbackUrl = new URL(`/identity/smile/callback/${id}/${proof(id, settings.secret)}`, settings.callback);
+  const form = new FormData();
+  form.set('name', kind === 'nin' ? 'Fast Logistics NIN and selfie' : 'Fast Logistics driver licence');
+  form.set('id_types', JSON.stringify([checks[kind]]));
+  form.set('notice_privacy_policy_url', settings.privacy);
+  form.set('is_single_use', 'true');
+  form.set('expires_at', expires);
+  form.set('callback_url', callbackUrl.href);
+  form.set('user_id', providerUser);
+  // The link is created with no database connection held. Two racing taps can make two
+  // links, and the newest is used. The insert still requires a live account.
+  const link = await smile(settings, '/v3/smile_links', form);
+  if (link?.user_id !== providerUser || typeof link.ref_id !== 'string' || !uuid.test(link.ref_id) ||
+      link.link !== `https://links.usesmileid.com/v3/${settings.partner}/${link.ref_id}`) {
+    return send(503, { error: 'Smile ID did not return a valid verification link' });
+  }
+  const saved = await db.query(
+    `INSERT INTO rider_identity_checks (id,rider_id,kind,provider_user_id,provider_link_id,verification_url,expires_at)
+     SELECT $1,id,$3,$4,$5,$6,$7 FROM accounts WHERE id=$2 AND deleted_at IS NULL`,
+    [id,user.id,kind,providerUser,link.ref_id,link.link,expires],
+  );
+  if (!saved.rowCount) return send(401, { error: 'Sign in required' });
+  return send(201, { url: link.link });
 }

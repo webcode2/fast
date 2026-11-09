@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { authenticatedAccount, db, limited, readJson } from './auth.ts';
+import { clientAddress } from './runtime.ts';
 import { NoStreetRoute, streetRoute, type Point, type StreetRoute } from './routing.ts';
 
 export const fareFloorKoboPerMeter = 15;
@@ -63,12 +64,10 @@ export async function orders(request: IncomingMessage, path: string) {
         !Number.isInteger(offered) || offered <= 0 || offered > 2_147_483_647) {
       return send(400, { error: 'Provide a UUID Idempotency-Key and a positive offeredFareKobo' });
     }
-    if (paymentMethod !== undefined && paymentMethod !== 'cash' && paymentMethod !== 'digital') {
+    if (paymentMethod !== 'cash' && paymentMethod !== 'digital') {
       return send(400, { error: 'Payment method must be cash or digital' });
     }
-    const details = [pickup, dropoff, offered];
-    requestHash = createHash('sha256')
-      .update(JSON.stringify(paymentMethod === undefined ? details : [...details, paymentMethod])).digest('hex');
+    requestHash = createHash('sha256').update(JSON.stringify([pickup, dropoff, offered, paymentMethod])).digest('hex');
     const { rows: [saved] } = await db.query(
       `SELECT ${fields}, request_hash FROM delivery_orders WHERE customer_id=$1 AND idempotency_key=$2`,
       [account.id, key],
@@ -79,7 +78,7 @@ export async function orders(request: IncomingMessage, path: string) {
     }
   }
 
-  const bucket = account ? `route:${account.id}` : `guest-route:${request.socket.remoteAddress ?? 'unknown'}`;
+  const bucket = account ? `route:${account.id}` : `guest-route:${clientAddress(request)}`;
   if (await limited(bucket, account ? 60 : 15)) return send(429, { error: 'Too many quote requests' });
   let route: StreetRoute;
   try {
@@ -104,7 +103,7 @@ export async function orders(request: IncomingMessage, path: string) {
        ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$13,$14::jsonb)
      ON CONFLICT (customer_id,idempotency_key) DO NOTHING RETURNING ${fields}`,
     [account.id, key, requestHash, pickup.longitude, pickup.latitude, dropoff.longitude, dropoff.latitude,
-      distanceMeters, fareFloorKobo, offered, paymentMethod ?? null, placeLabel(input?.pickupLabel), placeLabel(input?.dropoffLabel),
+      distanceMeters, fareFloorKobo, offered, paymentMethod, placeLabel(input?.pickupLabel), placeLabel(input?.dropoffLabel),
       route.path.length ? JSON.stringify(route.path) : null],
   );
   if (saved) return send(201, { order: saved });

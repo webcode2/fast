@@ -1,6 +1,7 @@
 import type { IncomingMessage } from 'node:http';
 import { authenticatedAccount, db, limited, readJson } from './auth.ts';
 import { bachs, bachsKey, BachsRequestError, isProviderId, naira } from './bachs.ts';
+import { commissionKobo } from './commission.ts';
 import { uuid } from './orders.ts';
 import { hasStaffPermission } from './staff.ts';
 
@@ -91,6 +92,20 @@ export async function settleCashCollection(data: Record<string, unknown>) {
   }
 }
 
+type Queryable = { query: typeof db.query };
+
+/** Records what a rider owes for a completed cash delivery, due at the end of the Lagos day. */
+export async function recordCashCommission(client: Queryable, orderId: string, fareKobo: number) {
+  const amount = commissionKobo(fareKobo);
+  if (amount <= 0) return;
+  await client.query(
+    `INSERT INTO cash_commissions (order_id,rider_id,amount_kobo,business_date,due_at)
+     SELECT id,assigned_rider_id,$2,(completed_at AT TIME ZONE 'Africa/Lagos')::date,
+       (((completed_at AT TIME ZONE 'Africa/Lagos')::date + 1)::timestamp AT TIME ZONE 'Africa/Lagos')
+     FROM delivery_orders WHERE id=$1`, [orderId, amount],
+  );
+}
+
 export async function cashCommission(request: IncomingMessage, path: string) {
   const account = await authenticatedAccount(request);
   if (!account) return send(401, { error: 'Sign in required' });
@@ -132,50 +147,44 @@ export async function cashCommission(request: IncomingMessage, path: string) {
     batch = await reserve(account.id);
     if ('status' in batch) return batch;
   }
-  const client = await db.connect();
+  // Commit the stable reference first, so a slow provider never holds a database connection.
+  const { rows: [prior] } = await db.query(
+    'SELECT checkout_started_at FROM cash_commission_repayments WHERE id=$1', [batch.id],
+  );
+  const { rows: [current] } = await db.query(
+    `UPDATE cash_commission_repayments SET checkout_started_at=COALESCE(checkout_started_at,clock_timestamp())
+     WHERE id=$1 AND state='pending' RETURNING *`, [batch.id],
+  );
+  if (!current) return conflict();
+  if (current.checkout_url) return send(200, { authorizationUrl: current.checkout_url, amountKobo: current.amount_kobo });
+  const reference = 'cash-' + current.id;
+  let checkout;
   try {
-    await client.query('BEGIN');
-    const { rows: [current] } = await client.query(
-      "SELECT * FROM cash_commission_repayments WHERE id=$1 AND state='pending' FOR UPDATE", [batch.id],
-    );
-    if (!current) return conflict();
-    if (current.checkout_url) return send(200, { authorizationUrl: current.checkout_url, amountKobo: current.amount_kobo });
-    const reference = 'cash-' + current.id;
-    let checkout;
-    try {
-      checkout = await bachs('/checkout-sessions', {
-        key: reference,
-        body: {
-          pricing: { amount: naira(Number(current.amount_kobo)), currency: 'NGN' },
-          customer: { email: account.email }, reference, payment_method_types: ['NGN_CARD'],
-        },
-      });
-    } catch (error) {
-      const rejected = !current.checkout_started_at && error instanceof BachsRequestError &&
-        (error.status === 400 || error.status === 422) && error.code === 'VALIDATION_ERROR';
-      await client.query(
-        `UPDATE cash_commission_repayments SET checkout_started_at=COALESCE(checkout_started_at,clock_timestamp()),
-           state=CASE WHEN $2 THEN 'expired' ELSE state END WHERE id=$1`, [current.id, rejected],
-      );
-      await client.query('COMMIT');
-      return rejected
-        ? send(422, { error: 'Bachs declined this checkout. Contact support to arrange a verified repayment.' })
-        : send(503, { error: 'Bachs commission checkout is unavailable. Retry to resume.' });
+    checkout = await bachs('/checkout-sessions', {
+      key: reference,
+      body: {
+        pricing: { amount: naira(Number(current.amount_kobo)), currency: 'NGN' },
+        customer: { email: account.email }, reference, payment_method_types: ['NGN_CARD'],
+      },
+    });
+  } catch (error) {
+    const rejected = !prior?.checkout_started_at && error instanceof BachsRequestError &&
+      (error.status === 400 || error.status === 422) && error.code === 'VALIDATION_ERROR';
+    if (rejected) {
+      await db.query("UPDATE cash_commission_repayments SET state='expired' WHERE id=$1 AND state='pending'", [current.id]);
+      return send(422, { error: 'Bachs declined this checkout. Contact support to arrange a verified repayment.' });
     }
-    const valid = checkout?.reference === reference && isProviderId(checkout.checkout_id, 'chk_') &&
-      typeof checkout.checkout_url === 'string' && URL.canParse(checkout.checkout_url) &&
-      new URL(checkout.checkout_url).origin === 'https://checkout.bachs.io' &&
-      Number.isFinite(Date.parse(checkout.expires_at));
-    await client.query(
-      `UPDATE cash_commission_repayments SET checkout_started_at=COALESCE(checkout_started_at,clock_timestamp()),
-         checkout_id=$2,checkout_url=$3,checkout_expires_at=$4 WHERE id=$1`,
-      [current.id, valid ? checkout.checkout_id : null, valid ? checkout.checkout_url : null,
-        valid ? checkout.expires_at : null],
-    );
-    await client.query('COMMIT');
-    return valid ? send(200, { authorizationUrl: checkout.checkout_url, amountKobo: current.amount_kobo })
-      : send(503, { error: 'Bachs commission checkout is unavailable. Retry to resume.' });
-  } finally {
-    try { await client.query('ROLLBACK'); } finally { client.release(); }
+    return send(503, { error: 'Bachs commission checkout is unavailable. Retry to resume.' });
   }
+  const valid = checkout?.reference === reference && isProviderId(checkout.checkout_id, 'chk_') &&
+    typeof checkout.checkout_url === 'string' && URL.canParse(checkout.checkout_url) &&
+    new URL(checkout.checkout_url).origin === 'https://checkout.bachs.io' &&
+    Number.isFinite(Date.parse(checkout.expires_at));
+  if (!valid) return send(503, { error: 'Bachs commission checkout is unavailable. Retry to resume.' });
+  await db.query(
+    `UPDATE cash_commission_repayments SET checkout_id=$2,checkout_url=$3,checkout_expires_at=$4
+     WHERE id=$1 AND state='pending'`,
+    [current.id, checkout.checkout_id, checkout.checkout_url, checkout.expires_at],
+  );
+  return send(200, { authorizationUrl: checkout.checkout_url, amountKobo: current.amount_kobo });
 }
