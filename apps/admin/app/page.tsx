@@ -19,7 +19,7 @@ export default async function Dashboard() {
   return (
     <>
       <header className="site-header">
-        <div className="container">Fast Logistics <span>Admin</span> <Link href="/account">Account</Link> {can('dispute_resolver') && <Link href="/disputes">Disputes</Link>}
+        <div className="container">FAST <span>Admin</span> <Link href="/account">Account</Link> {can('dispute_resolver') && <Link href="/disputes">Disputes</Link>}
           {can('rider_verifier') && <Link href="/rider-identity">Rider identity</Link>}
           {can('staff_manager') && <Link href="/staff">Staff roles</Link>}
           {can('archive_exporter') && <Link href="/archives">Archives</Link>}

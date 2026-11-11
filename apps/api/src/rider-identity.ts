@@ -157,7 +157,7 @@ export async function riderIdentity(request: IncomingMessage, path: string) {
   const expires = new Date(Date.now() + 30 * 60_000).toISOString();
   const callbackUrl = new URL(`/identity/smile/callback/${id}/${proof(id, settings.secret)}`, settings.callback);
   const form = new FormData();
-  form.set('name', kind === 'nin' ? 'Fast Logistics NIN and selfie' : 'Fast Logistics driver licence');
+  form.set('name', kind === 'nin' ? 'FAST NIN and selfie' : 'FAST driver licence');
   form.set('id_types', JSON.stringify([checks[kind]]));
   form.set('notice_privacy_policy_url', settings.privacy);
   form.set('is_single_use', 'true');

@@ -62,7 +62,7 @@ class RiderTripLocation {
         intervalDuration: const Duration(seconds: 5),
         foregroundNotificationConfig: const ForegroundNotificationConfig(
           notificationTitle: 'Delivery location sharing',
-          notificationText: 'Fast Logistics is sharing your location for this active delivery.',
+          notificationText: 'FAST is sharing your location for this active delivery.',
           setOngoing: true,
         ),
       ),

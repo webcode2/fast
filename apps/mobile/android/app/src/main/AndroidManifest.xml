@@ -9,7 +9,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:allowBackup="false"
-        android:label="Fast Logistics"
+        android:label="FAST"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <receiver

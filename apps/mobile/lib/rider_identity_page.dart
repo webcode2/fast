@@ -123,7 +123,7 @@ class _RiderIdentityPageState extends State<RiderIdentityPage>
             const Notice('Hosted verification is temporarily unavailable.')
           else ...[
             const Text(
-              'Smile ID collects your NIN, selfie, and driver licence. Fast Logistics receives the check results for staff review.',
+              'Smile ID collects your NIN, selfie, and driver licence. FAST receives the check results for staff review.',
             ),
             CheckboxListTile(
               contentPadding: EdgeInsets.zero,

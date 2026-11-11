@@ -65,13 +65,13 @@ class SignupChoice extends StatelessWidget {
                   children: [
                     Semantics(
                       header: true,
-                      label: 'Fast Logistics. Pack it up. Send it off.',
+                      label: 'FAST. Pack it up. Send it off.',
                       excludeSemantics: true,
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Fast Logistics',
+                            'FAST',
                             style: theme.textTheme.titleMedium?.copyWith(
                               color: appBlue,
                               fontWeight: FontWeight.w700,

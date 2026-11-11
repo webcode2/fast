@@ -26,7 +26,7 @@ class FastLogisticsApp extends StatelessWidget {
   Widget build(BuildContext context) => ValueListenableBuilder(
     valueListenable: appearance,
     builder: (context, mode, _) => MaterialApp(
-      title: 'Fast Logistics',
+      title: 'FAST',
       navigatorKey: appNavigatorKey,
       debugShowCheckedModeBanner: false,
       theme: appTheme(Brightness.light),

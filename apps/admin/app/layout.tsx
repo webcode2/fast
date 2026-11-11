@@ -3,8 +3,8 @@ import type { ReactNode } from 'react';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Operations | Fast Logistics',
-  description: 'Fast Logistics administration dashboard',
+  title: 'Operations | FAST',
+  description: 'FAST administration dashboard',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

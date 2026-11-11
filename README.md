@@ -49,11 +49,12 @@ up shared changes.
 
 `apps/web` is the public website, as static files that any host can serve. Preview
 it with `npm run dev:web` and open `http://127.0.0.1:8092`. The host must support
-range requests so the video can jump to each step.
+range requests for video playback.
 
-The waitlist form posts to `POST /waitlist` on the API. Before deploying, set
-`data-endpoint` on the form in `apps/web/index.html` to the public API URL, and add
-the website's address to `WAITLIST_ORIGINS` in the API environment. Apply migration
+The waitlist form posts to `POST /waitlist` on the API. In production, route
+`POST /waitlist` on the public website to the API. If hosting the API on a
+separate domain, set the form's `action` in `apps/web/index.html` to its HTTPS
+URL and add the website origin to `WAITLIST_ORIGINS`. Apply migration
 `015_waitlist.sql`. Administrators see signups and remove people under **Waitlist**
 in the admin dashboard. Run `DATABASE_URL=… node apps/api/checks/waitlist.ts` against
 a fresh, migrated test database to exercise the flow.

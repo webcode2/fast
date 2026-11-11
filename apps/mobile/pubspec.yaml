@@ -1,5 +1,5 @@
 name: fast_logistics
-description: "Fast Logistics customer and rider app."
+description: "FAST customer and rider app."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev

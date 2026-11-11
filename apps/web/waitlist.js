@@ -2,6 +2,9 @@
 const form = document.getElementById('waitlist-form');
 const status = document.getElementById('waitlist-status');
 const submit = form.querySelector('button[type="submit"]');
+const endpoint = location.origin === 'http://127.0.0.1:8092'
+  ? 'http://127.0.0.1:8080/waitlist'
+  : form.action;
 
 const show = (message, isError) => {
   status.textContent = message;
@@ -15,7 +18,7 @@ form.addEventListener('submit', async (event) => {
   submit.disabled = true;
   show('Sending…', false);
   try {
-    const response = await fetch(form.dataset.endpoint, {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -27,7 +30,7 @@ form.addEventListener('submit', async (event) => {
     });
     if (response.ok) {
       form.reset();
-      show('You’re on the list. We’ll let you know when Fast Logistics launches.', false);
+      show('You’re on the list. We’ll let you know when FAST launches.', false);
       status.focus();
       return;
     }
@@ -38,4 +41,8 @@ form.addEventListener('submit', async (event) => {
   } finally {
     submit.disabled = false;
   }
+});
+
+document.querySelector('[data-waitlist-role="rider"]').addEventListener('click', () => {
+  form.elements.role.value = 'rider';
 });
